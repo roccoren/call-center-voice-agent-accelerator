@@ -23,6 +23,8 @@ from azure.identity.aio import (
     ManagedIdentityCredential,
 )
 
+from .base import MemoryBackend
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -41,7 +43,7 @@ _MAX_CONTEXT_TURNS = int(os.getenv("MEMORY_MAX_CONTEXT_TURNS", "20"))
 _MAX_SUMMARY_TURNS = int(os.getenv("MEMORY_MAX_SUMMARY_TURNS", "50"))
 
 
-class ConversationMemory:
+class ConversationMemory(MemoryBackend):
     """Async Cosmos DB-backed conversation memory."""
 
     def __init__(self):

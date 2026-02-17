@@ -4,7 +4,7 @@ import os
 
 from app.handler.acs_event_handler import AcsEventHandler
 from app.handler.acs_media_handler import ACSMediaHandler
-from app.memory.cosmos_memory import memory as conversation_memory
+from app.memory.factory import memory as conversation_memory
 from app.memory import call_registry
 from dotenv import load_dotenv
 from quart import Quart, request, websocket, jsonify
@@ -44,10 +44,11 @@ acs_handler = AcsEventHandler(app.config)
 async def startup():
     """Initialize conversation memory on app startup."""
     ok = await conversation_memory.initialize()
+    backend_name = os.getenv("MEMORY_BACKEND", "cosmosdb").lower()
     if ok:
-        logger.info("Conversation memory (Cosmos DB) is READY")
+        logger.info("Conversation memory (%s) is READY", backend_name)
     else:
-        logger.warning("Conversation memory is DISABLED — set AZURE_COSMOS_ENDPOINT to enable")
+        logger.warning("Conversation memory is DISABLED — check backend config (MEMORY_BACKEND=%s)", backend_name)
 
 
 @app.route("/acs/incomingcall", methods=["POST"])
@@ -170,6 +171,7 @@ async def health():
     return jsonify({
         "status": "healthy",
         "memory": "enabled" if conversation_memory.is_ready else "disabled",
+        "backend": os.getenv("MEMORY_BACKEND", "cosmosdb"),
     })
 
 

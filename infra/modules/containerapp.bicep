@@ -113,6 +113,10 @@ resource containerApp 'Microsoft.App/containerApps@2024-10-02-preview' = {
               name: 'AZURE_COSMOS_DATABASE'
               value: cosmosDatabaseName
             }
+            {
+              name: 'MEMORY_BACKEND'
+              value: 'cosmosdb'
+            }
           ]
           resources: {
             cpu: json('2.0')

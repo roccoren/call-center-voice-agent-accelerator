@@ -13,7 +13,7 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.typing import Data
 
 from .ambient_mixer import AmbientMixer
-from ..memory.cosmos_memory import memory as conversation_memory
+from ..memory.factory import memory as conversation_memory
 
 logger = logging.getLogger(__name__)
 
