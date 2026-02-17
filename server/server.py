@@ -88,7 +88,7 @@ async def acs_ws():
     except Exception:
         logger.exception("ACS WebSocket connection closed")
     finally:
-        await handler.stop_audio_output()
+        await handler.stop_audio()
 
 
 @app.websocket("/web/ws")
@@ -110,7 +110,7 @@ async def web_ws():
     except Exception:
         logger.exception("Web WebSocket connection closed")
     finally:
-        await handler.stop_audio_output()
+        await handler.stop_audio()
 
 
 @app.route("/")
