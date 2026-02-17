@@ -258,6 +258,19 @@ wheels = [
 ]
 
 [[package]]
+name = "azure-cosmos"
+version = "4.14.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-core" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/62/7d/b503a14639caace96f6a5c801c817a4c9f7ac626d75d5bddb6757da0376b/azure_cosmos-4.14.6.tar.gz", hash = "sha256:5e7075d051c84de405a63de05752b78e3b31190e9ee04f8cf85b37a954cd7784", size = 2056812, upload-time = "2026-02-03T22:16:58.429Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c2/7c/bd50e62ac330d1c194b3473947ffbe2f99bb0269dbe41824d2534cf3251c/azure_cosmos-4.14.6-py3-none-any.whl", hash = "sha256:ea314e85eff9d31db980b7f2e88291579dedc77734bca7e9011d55d371fd0d5f", size = 395078, upload-time = "2026-02-03T22:17:01.44Z" },
+]
+
+[[package]]
 name = "azure-eventgrid"
 version = "4.22.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2030,12 +2043,13 @@ wheels = [
 [[package]]
 name = "voice-live-agent"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "azure-communication-callautomation" },
     { name = "azure-communication-identity" },
     { name = "azure-core" },
+    { name = "azure-cosmos" },
     { name = "azure-eventgrid" },
     { name = "azure-identity" },
     { name = "h2" },
@@ -2056,6 +2070,7 @@ requires-dist = [
     { name = "azure-communication-callautomation", specifier = ">=1.4.0" },
     { name = "azure-communication-identity", specifier = ">=1.5.0" },
     { name = "azure-core", specifier = ">=1.34.0" },
+    { name = "azure-cosmos", specifier = ">=4.9.0" },
     { name = "azure-eventgrid", specifier = ">=4.22.0" },
     { name = "azure-identity", specifier = ">=1.23.0" },
     { name = "h2", specifier = ">=4.3.0" },

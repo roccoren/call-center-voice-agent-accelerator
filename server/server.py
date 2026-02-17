@@ -4,8 +4,10 @@ import os
 
 from app.handler.acs_event_handler import AcsEventHandler
 from app.handler.acs_media_handler import ACSMediaHandler
+from app.memory.cosmos_memory import memory as conversation_memory
+from app.memory import call_registry
 from dotenv import load_dotenv
-from quart import Quart, request, websocket
+from quart import Quart, request, websocket, jsonify
 
 load_dotenv()
 
@@ -38,6 +40,16 @@ else:
 acs_handler = AcsEventHandler(app.config)
 
 
+@app.before_serving
+async def startup():
+    """Initialize conversation memory on app startup."""
+    ok = await conversation_memory.initialize()
+    if ok:
+        logger.info("Conversation memory (Cosmos DB) is READY")
+    else:
+        logger.warning("Conversation memory is DISABLED — set AZURE_COSMOS_ENDPOINT to enable")
+
+
 @app.route("/acs/incomingcall", methods=["POST"])
 async def incoming_call_handler():
     """Handles initial incoming call event from EventGrid."""
@@ -58,7 +70,13 @@ async def acs_ws():
     """WebSocket endpoint for ACS to send audio to Voice Live."""
     logger = logging.getLogger("acs_ws")
     logger.info("Incoming ACS WebSocket connection")
-    handler = ACSMediaHandler(app.config)
+
+    # ACS media streaming sends caller info in the first message metadata,
+    # but we also look up from the call registry populated by event handler.
+    caller_id = "phone-anonymous"
+    session_id = ""
+
+    handler = ACSMediaHandler(app.config, caller_id=caller_id, session_id=session_id)
     await handler.init_incoming_websocket(websocket, is_raw_audio=False)
     asyncio.create_task(handler.connect())
     try:
@@ -78,7 +96,9 @@ async def web_ws():
     """WebSocket endpoint for web clients to send audio to Voice Live."""
     logger = logging.getLogger("web_ws")
     logger.info("Incoming Web WebSocket connection")
-    handler = ACSMediaHandler(app.config)
+    # Web clients can pass caller_id as query param for memory
+    caller_id = websocket.args.get("caller_id", "web-anonymous")
+    handler = ACSMediaHandler(app.config, caller_id=caller_id)
     await handler.init_incoming_websocket(websocket, is_raw_audio=True)
     asyncio.create_task(handler.connect())
     try:
@@ -97,6 +117,60 @@ async def web_ws():
 async def index():
     """Serves the static index page."""
     return await app.send_static_file("index.html")
+
+
+# ---------------------------------------------------------------------------
+# Memory REST API
+# ---------------------------------------------------------------------------
+
+@app.route("/memory/<caller_id>/history", methods=["GET"])
+async def memory_get_history(caller_id: str):
+    """Get recent conversation history for a caller."""
+    if not conversation_memory.is_ready:
+        return jsonify({"error": "Memory not configured"}), 503
+    limit = request.args.get("limit", 20, type=int)
+    turns = await conversation_memory.get_recent_turns(caller_id, limit=limit)
+    return jsonify({"callerId": caller_id, "turns": turns})
+
+
+@app.route("/memory/<caller_id>/summary", methods=["GET"])
+async def memory_get_summary(caller_id: str):
+    """Get the stored summary for a caller."""
+    if not conversation_memory.is_ready:
+        return jsonify({"error": "Memory not configured"}), 503
+    summary = await conversation_memory.get_summary(caller_id)
+    return jsonify({"callerId": caller_id, "summary": summary})
+
+
+@app.route("/memory/<caller_id>/summary", methods=["PUT"])
+async def memory_put_summary(caller_id: str):
+    """Update the summary for a caller."""
+    if not conversation_memory.is_ready:
+        return jsonify({"error": "Memory not configured"}), 503
+    body = await request.get_json()
+    summary = body.get("summary", "")
+    ok = await conversation_memory.save_summary(caller_id, summary)
+    if ok:
+        return jsonify({"status": "ok"})
+    return jsonify({"error": "Failed to save summary"}), 500
+
+
+@app.route("/memory/<caller_id>", methods=["DELETE"])
+async def memory_delete(caller_id: str):
+    """Delete all conversation history for a caller."""
+    if not conversation_memory.is_ready:
+        return jsonify({"error": "Memory not configured"}), 503
+    deleted = await conversation_memory.delete_caller_history(caller_id)
+    return jsonify({"callerId": caller_id, "deletedTurns": deleted})
+
+
+@app.route("/health", methods=["GET"])
+async def health():
+    """Health check endpoint."""
+    return jsonify({
+        "status": "healthy",
+        "memory": "enabled" if conversation_memory.is_ready else "disabled",
+    })
 
 
 if __name__ == "__main__":

@@ -92,6 +92,19 @@ module acs 'modules/acs.bicep' = {
   }
 }
 
+module cosmos 'modules/cosmos.bicep' = {
+  name: 'cosmos-deployment'
+  scope: rg
+  params: {
+    location: location
+    environmentName: environmentName
+    uniqueSuffix: uniqueSuffix
+    tags: tags
+    identityPrincipalId: appIdentity.outputs.principalId
+  }
+  dependsOn: [ appIdentity ]
+}
+
 var keyVaultName = toLower(replace('kv-${environmentName}-${uniqueSuffix}', '_', '-'))
 var sanitizedKeyVaultName = take(toLower(replace(replace(replace(replace(keyVaultName, '--', '-'), '_', '-'), '[^a-zA-Z0-9-]', ''), '-$', '')), 24)
 module keyvault 'modules/keyvault.bicep' = {
@@ -135,6 +148,8 @@ module containerapp 'modules/containerapp.bicep' = {
     acsConnectionStringSecretUri: keyvault.outputs.acsConnectionStringUri
     logAnalyticsWorkspaceName: logAnalyticsName
     imageName: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+    cosmosEndpoint: cosmos.outputs.cosmosEndpoint
+    cosmosDatabaseName: cosmos.outputs.cosmosDatabaseName
   }
   dependsOn: [keyvault, RoleAssignments]
 }

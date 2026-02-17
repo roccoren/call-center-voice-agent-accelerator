@@ -14,6 +14,8 @@ from azure.communication.callautomation.aio import CallAutomationClient
 from azure.eventgrid import EventGridEvent, SystemEventNames
 from quart import Response
 
+from ..memory import call_registry
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,6 +68,7 @@ class AcsEventHandler:
                 )
                 callback_uri = f"{callback_events_uri}/{guid}?{query_parameters}"
 
+                # Store caller_id in context for websocket handler
                 parsed_url = urlparse(callback_events_uri)
                 websocket_url = urlunparse(
                     ("wss", parsed_url.netloc, "/acs/ws", "", "", "")
@@ -93,6 +96,11 @@ class AcsEventHandler:
 
                 logger.info(
                     "Answered call for connection id: %s", result.call_connection_id
+                )
+
+                # Register caller for memory lookup by websocket handler
+                await call_registry.register(
+                    result.call_connection_id, caller_id, str(guid)
                 )
                 return Response(status=200)
 

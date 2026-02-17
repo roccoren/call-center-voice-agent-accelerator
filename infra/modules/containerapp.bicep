@@ -12,6 +12,10 @@ param acsConnectionStringSecretUri string
 param logAnalyticsWorkspaceName string
 @description('The name of the container image')
 param imageName string = ''
+@description('Cosmos DB endpoint for conversation memory')
+param cosmosEndpoint string = ''
+@description('Cosmos DB database name')
+param cosmosDatabaseName string = 'voiceagent'
 
 // Helper to sanitize environmentName for valid container app name
 var sanitizedEnvName = toLower(replace(replace(replace(replace(environmentName, ' ', '-'), '--', '-'), '[^a-zA-Z0-9-]', ''), '_', '-'))
@@ -100,6 +104,14 @@ resource containerApp 'Microsoft.App/containerApps@2024-10-02-preview' = {
             {
               name: 'DEBUG_MODE'
               value: 'true'
+            }
+            {
+              name: 'AZURE_COSMOS_ENDPOINT'
+              value: cosmosEndpoint
+            }
+            {
+              name: 'AZURE_COSMOS_DATABASE'
+              value: cosmosDatabaseName
             }
           ]
           resources: {

@@ -13,6 +13,7 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.typing import Data
 
 from .ambient_mixer import AmbientMixer
+from ..memory.cosmos_memory import memory as conversation_memory
 
 logger = logging.getLogger(__name__)
 
@@ -52,16 +53,19 @@ def session_config():
 class ACSMediaHandler:
     """Manages audio streaming between client and Azure Voice Live API."""
 
-    def __init__(self, config):
+    def __init__(self, config, caller_id: str = "anonymous", session_id: str = ""):
         self.endpoint = config["AZURE_VOICE_LIVE_ENDPOINT"]
         self.model = config["VOICE_LIVE_MODEL"]
         self.api_key = config["AZURE_VOICE_LIVE_API_KEY"]
         self.client_id = config["AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID"]
+        self.caller_id = caller_id
+        self.session_id = session_id or str(uuid.uuid4())
         self.send_queue = asyncio.Queue()
         self.ws = None
         self.send_task = None
         self.incoming_websocket = None
         self.is_raw_audio = True
+        self._memory_context: str = ""  # injected into session instructions
 
         # TTS output buffering for continuous ambient mixing
         self._tts_output_buffer = bytearray()
@@ -85,6 +89,21 @@ class ACSMediaHandler:
 
     async def connect(self):
         """Connects to Azure Voice Live API via WebSocket."""
+        # Load conversation memory for this caller
+        if conversation_memory.is_ready and self.caller_id != "anonymous":
+            try:
+                self._memory_context = await conversation_memory.build_context_prompt(
+                    self.caller_id
+                )
+                if self._memory_context:
+                    logger.info(
+                        "Loaded memory context for caller %s (%d chars)",
+                        self.caller_id,
+                        len(self._memory_context),
+                    )
+            except Exception:
+                logger.exception("Failed to load memory for %s", self.caller_id)
+
         endpoint = self.endpoint.rstrip("/")
         model = self.model.strip()
         url = f"{endpoint}/voice-live/realtime?api-version=2025-05-01-preview&model={model}"
@@ -106,7 +125,16 @@ class ACSMediaHandler:
         self.ws = await ws_connect(url, additional_headers=headers)
         logger.info("[VoiceLiveACSHandler] Connected to Voice Live API")
 
-        await self._send_json(session_config())
+        # Build session config with memory context injected
+        config = session_config()
+        if self._memory_context:
+            base_instructions = config["session"]["instructions"]
+            config["session"]["instructions"] = (
+                base_instructions + "\n" + self._memory_context
+            )
+            logger.info("Injected memory context into session instructions")
+
+        await self._send_json(config)
         await self._send_json({"type": "response.create"})
 
         asyncio.create_task(self._receiver_loop())
@@ -166,6 +194,16 @@ class ACSMediaHandler:
                     case "conversation.item.input_audio_transcription.completed":
                         transcript = event.get("transcript")
                         logger.info("User: %s", transcript)
+                        # Save user turn to memory
+                        if conversation_memory.is_ready and transcript:
+                            asyncio.create_task(
+                                conversation_memory.save_turn(
+                                    self.caller_id,
+                                    "user",
+                                    transcript,
+                                    session_id=self.session_id,
+                                )
+                            )
 
                     case "conversation.item.input_audio_transcription.failed":
                         error_msg = event.get("error")
@@ -186,6 +224,16 @@ class ACSMediaHandler:
                         await self.send_message(
                             json.dumps({"Kind": "Transcription", "Text": transcript})
                         )
+                        # Save assistant turn to memory
+                        if conversation_memory.is_ready and transcript:
+                            asyncio.create_task(
+                                conversation_memory.save_turn(
+                                    self.caller_id,
+                                    "assistant",
+                                    transcript,
+                                    session_id=self.session_id,
+                                )
+                            )
 
                     case "response.audio.delta":
                         delta = event.get("delta")
