@@ -77,6 +77,9 @@ async def startup():
     global acs_handler
 
     acs_connection_string = await _load_acs_connection_string_from_key_vault(app.config)
+    if not acs_connection_string:
+        # Fall back to env var if Key Vault is not configured
+        acs_connection_string = os.getenv("ACS_CONNECTION_STRING", "")
     if acs_connection_string:
         app.config["ACS_CONNECTION_STRING"] = acs_connection_string
         if not app.config.get("ACS_ENDPOINT"):
