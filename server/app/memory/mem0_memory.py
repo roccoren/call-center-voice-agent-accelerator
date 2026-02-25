@@ -102,7 +102,7 @@ class Mem0Memory(MemoryBackend):
                     "provider": "azure_ai_search",
                     "config": {
                         "service_name": _search_service_name(),
-                        "api_key": None,  # triggers DefaultAzureCredential in mem0
+                        "api_key": "",  # empty string triggers DefaultAzureCredential in mem0
                         "collection_name": _COLLECTION_NAME,
                         "embedding_model_dims": 1536,
                     },
