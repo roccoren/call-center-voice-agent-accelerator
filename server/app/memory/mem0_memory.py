@@ -63,17 +63,13 @@ class Mem0Memory(MemoryBackend):
                 managed_identity_client_id=managed_identity_client_id
             )
 
-            # Acquire tokens for Azure OpenAI and Azure AI Search
+            # Acquire token for Azure OpenAI (mem0 LLM/embedder need api_key)
             openai_token = await asyncio.to_thread(
                 lambda: self._credential.get_token(
                     "https://cognitiveservices.azure.com/.default"
                 ).token
             )
-            search_token = await asyncio.to_thread(
-                lambda: self._credential.get_token(
-                    "https://search.azure.com/.default"
-                ).token
-            )
+            # Azure AI Search: pass None to let mem0 use DefaultAzureCredential natively
 
             config = {
                 "llm": {
@@ -106,7 +102,7 @@ class Mem0Memory(MemoryBackend):
                     "provider": "azure_ai_search",
                     "config": {
                         "service_name": _search_service_name(),
-                        "api_key": search_token,
+                        "api_key": None,  # triggers DefaultAzureCredential in mem0
                         "collection_name": _COLLECTION_NAME,
                         "embedding_model_dims": 1536,
                     },
