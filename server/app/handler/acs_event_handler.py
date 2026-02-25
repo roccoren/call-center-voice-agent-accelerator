@@ -12,6 +12,7 @@ from azure.communication.callautomation import (AudioFormat,
                                                 StreamingTransportType)
 from azure.communication.callautomation.aio import CallAutomationClient
 from azure.eventgrid import EventGridEvent, SystemEventNames
+from azure.identity.aio import DefaultAzureCredential
 from quart import Response
 
 from ..memory import call_registry
@@ -23,8 +24,14 @@ class AcsEventHandler:
     """Handles ACS event processing and call answering logic."""
 
     def __init__(self, config):
-        self.acs_client = CallAutomationClient.from_connection_string(
-            config["ACS_CONNECTION_STRING"]
+        managed_identity_client_id = (
+            config.get("AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID") or None
+        )
+        self._credential = DefaultAzureCredential(
+            managed_identity_client_id=managed_identity_client_id
+        )
+        self.acs_client = CallAutomationClient(
+            endpoint=config["ACS_ENDPOINT"], credential=self._credential
         )
 
     async def process_incoming_call(self, events: list, host_url, config):

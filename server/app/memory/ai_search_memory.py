@@ -8,23 +8,17 @@ and optional semantic search over past conversations.
 
 import logging
 import os
-import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from azure.identity.aio import (
-    DefaultAzureCredential,
-    ManagedIdentityCredential,
-)
-from azure.search.documents.aio import SearchClient
-from azure.search.documents.indexes.aio import SearchIndexClient
+from azure.identity.aio import DefaultAzureCredential
+from azure.search.documents.aio import SearchClient, SearchIndexClient
 from azure.search.documents.indexes.models import (
     SearchIndex,
     SimpleField,
     SearchableField,
     SearchFieldDataType,
-    SearchField,
 )
 
 from .base import MemoryBackend
@@ -35,10 +29,8 @@ logger = logging.getLogger(__name__)
 # Configuration (env vars)
 # ---------------------------------------------------------------------------
 _SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT", "")
-_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY", "")  # optional – prefer managed identity
 _SEARCH_TURNS_INDEX = os.getenv("AZURE_SEARCH_TURNS_INDEX", "conversation-turns")
 _SEARCH_SUMMARIES_INDEX = os.getenv("AZURE_SEARCH_SUMMARIES_INDEX", "conversation-summaries")
-_MANAGED_IDENTITY_CLIENT_ID = os.getenv("AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID", "")
 
 _MAX_CONTEXT_TURNS = int(os.getenv("MEMORY_MAX_CONTEXT_TURNS", "20"))
 
@@ -75,7 +67,7 @@ class AISearchMemory(MemoryBackend):
         self._turns_client: Optional[SearchClient] = None
         self._summaries_client: Optional[SearchClient] = None
         self._ready = False
-        self._credential = None
+        self._credential: Optional[DefaultAzureCredential] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -86,15 +78,11 @@ class AISearchMemory(MemoryBackend):
             return False
 
         try:
-            if _SEARCH_KEY:
-                from azure.core.credentials import AzureKeyCredential
-                self._credential = AzureKeyCredential(_SEARCH_KEY)
-            elif _MANAGED_IDENTITY_CLIENT_ID:
-                self._credential = ManagedIdentityCredential(
-                    client_id=_MANAGED_IDENTITY_CLIENT_ID
+            self._credential = DefaultAzureCredential(
+                managed_identity_client_id=(
+                    os.getenv("AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID") or None
                 )
-            else:
-                self._credential = DefaultAzureCredential()
+            )
 
             # Ensure indexes exist
             index_client = SearchIndexClient(
@@ -300,6 +288,8 @@ class AISearchMemory(MemoryBackend):
             await self._turns_client.close()
         if self._summaries_client:
             await self._summaries_client.close()
+        if self._credential:
+            await self._credential.close()
 
 
 # ---------------------------------------------------------------------------

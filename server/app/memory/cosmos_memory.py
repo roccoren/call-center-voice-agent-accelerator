@@ -18,10 +18,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from azure.cosmos.aio import CosmosClient
-from azure.identity.aio import (
-    DefaultAzureCredential,
-    ManagedIdentityCredential,
-)
+from azure.identity.aio import DefaultAzureCredential
 
 from .base import MemoryBackend
 
@@ -34,8 +31,6 @@ _COSMOS_ENDPOINT = os.getenv("AZURE_COSMOS_ENDPOINT", "")
 _COSMOS_DATABASE = os.getenv("AZURE_COSMOS_DATABASE", "voiceagent")
 _COSMOS_CONTAINER = os.getenv("AZURE_COSMOS_CONTAINER", "conversations")
 _COSMOS_SUMMARY_CONTAINER = os.getenv("AZURE_COSMOS_SUMMARY_CONTAINER", "summaries")
-_COSMOS_KEY = os.getenv("AZURE_COSMOS_KEY", "")  # optional – prefer managed identity
-_MANAGED_IDENTITY_CLIENT_ID = os.getenv("AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID", "")
 
 # How many recent turns to retrieve when building context
 _MAX_CONTEXT_TURNS = int(os.getenv("MEMORY_MAX_CONTEXT_TURNS", "20"))
@@ -48,6 +43,7 @@ class ConversationMemory(MemoryBackend):
 
     def __init__(self):
         self._client: Optional[CosmosClient] = None
+        self._credential: Optional[DefaultAzureCredential] = None
         self._container = None
         self._summary_container = None
         self._ready = False
@@ -62,16 +58,13 @@ class ConversationMemory(MemoryBackend):
             return False
 
         try:
-            if _COSMOS_KEY:
-                self._client = CosmosClient(_COSMOS_ENDPOINT, credential=_COSMOS_KEY)
-            elif _MANAGED_IDENTITY_CLIENT_ID:
-                credential = ManagedIdentityCredential(
-                    client_id=_MANAGED_IDENTITY_CLIENT_ID
-                )
-                self._client = CosmosClient(_COSMOS_ENDPOINT, credential=credential)
-            else:
-                credential = DefaultAzureCredential()
-                self._client = CosmosClient(_COSMOS_ENDPOINT, credential=credential)
+            managed_identity_client_id = (
+                os.getenv("AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID") or None
+            )
+            self._credential = DefaultAzureCredential(
+                managed_identity_client_id=managed_identity_client_id
+            )
+            self._client = CosmosClient(_COSMOS_ENDPOINT, credential=self._credential)
 
             db = self._client.get_database_client(_COSMOS_DATABASE)
             self._container = db.get_container_client(_COSMOS_CONTAINER)
@@ -276,6 +269,8 @@ class ConversationMemory(MemoryBackend):
         """Close the Cosmos client."""
         if self._client:
             await self._client.close()
+        if self._credential:
+            await self._credential.close()
 
 
 # Singleton instance

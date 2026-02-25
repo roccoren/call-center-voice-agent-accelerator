@@ -8,7 +8,7 @@ import uuid
 from typing import Optional
 
 import numpy as np
-from azure.identity.aio import ManagedIdentityCredential
+from azure.identity.aio import DefaultAzureCredential
 from websockets.asyncio.client import connect as ws_connect
 from websockets.typing import Data
 
@@ -56,7 +56,6 @@ class ACSMediaHandler:
     def __init__(self, config, caller_id: str = "anonymous", session_id: str = ""):
         self.endpoint = config["AZURE_VOICE_LIVE_ENDPOINT"]
         self.model = config["VOICE_LIVE_MODEL"]
-        self.api_key = config["AZURE_VOICE_LIVE_API_KEY"]
         self.client_id = config["AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID"]
         self.caller_id = caller_id
         self.session_id = session_id or str(uuid.uuid4())
@@ -111,16 +110,15 @@ class ACSMediaHandler:
 
         headers = {"x-ms-client-request-id": self._generate_guid()}
 
-        if self.client_id:
-            # Use async context manager to auto-close the credential
-            async with ManagedIdentityCredential(client_id=self.client_id) as credential:
-                token = await credential.get_token(
-                    "https://cognitiveservices.azure.com/.default"
-                )
-                headers["Authorization"] = f"Bearer {token.token}"
-                logger.info("[VoiceLiveACSHandler] Connected to Voice Live API by managed identity")
-        else:
-            headers["api-key"] = self.api_key
+        managed_identity_client_id = self.client_id or None
+        async with DefaultAzureCredential(
+            managed_identity_client_id=managed_identity_client_id
+        ) as credential:
+            token = await credential.get_token(
+                "https://cognitiveservices.azure.com/.default"
+            )
+            headers["Authorization"] = f"Bearer {token.token}"
+            logger.info("[VoiceLiveACSHandler] Connected to Voice Live API using DefaultAzureCredential")
 
         self.ws = await ws_connect(url, additional_headers=headers)
         logger.info("[VoiceLiveACSHandler] Connected to Voice Live API")
