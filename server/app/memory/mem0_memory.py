@@ -1,24 +1,17 @@
-"""mem0-backed semantic conversation memory.
+"""mem0-backed semantic conversation memory using Azure AI Search.
 
-Uses mem0 (with Qdrant vector store + Azure OpenAI) to extract and store
-semantic memories from conversations.  Unlike raw transcript storage,
-mem0 distills conversations into meaningful facts and preferences that
-can be retrieved via semantic search.
+Uses the mem0 Python library with:
+- Azure AI Search as vector store (API key auth)
+- Azure OpenAI via managed identity (token-based auth, no API key needed)
 
-This backend can run standalone OR alongside Cosmos DB / AI Search:
-- Cosmos/Search stores raw transcripts (audit trail)
-- mem0 stores distilled semantic memories (context injection)
-
-Requires the mem0 CLI to be available at /usr/local/bin/mem0, backed by
-the mem0-integration setup on the gateway.
+This is self-contained for the call center app — does NOT share state
+with the OpenClaw mem0 instance.
 """
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
-import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -26,38 +19,120 @@ from .base import MemoryBackend
 
 logger = logging.getLogger(__name__)
 
-_MEM0_CLI = os.getenv("MEM0_CLI_PATH", "/usr/local/bin/mem0")
-_MAX_CONTEXT_TURNS = int(os.getenv("MEMORY_MAX_CONTEXT_TURNS", "20"))
+# ---------------------------------------------------------------------------
+# Configuration (env vars)
+# ---------------------------------------------------------------------------
+_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT", "")
+_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY", "")
+_OPENAI_ENDPOINT = os.getenv("MEM0_OPENAI_ENDPOINT", "")  # Azure OpenAI endpoint
+_OPENAI_API_KEY = os.getenv("MEM0_OPENAI_API_KEY", "")  # optional — falls back to managed identity
+_MANAGED_IDENTITY_CLIENT_ID = os.getenv("AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID", "")
+_LLM_DEPLOYMENT = os.getenv("MEM0_LLM_DEPLOYMENT", "gpt-4o-mini")
+_LLM_API_VERSION = os.getenv("MEM0_LLM_API_VERSION", "2025-01-01-preview")
+_EMBEDDING_DEPLOYMENT = os.getenv("MEM0_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
+_EMBEDDING_API_VERSION = os.getenv("MEM0_EMBEDDING_API_VERSION", "2023-05-15")
+_COLLECTION_NAME = os.getenv("MEM0_COLLECTION_NAME", "voice_agent_memories")
+
+
+def _get_openai_api_key() -> str:
+    """Get Azure OpenAI API key — use env var or acquire a token via managed identity."""
+    if _OPENAI_API_KEY:
+        return _OPENAI_API_KEY
+
+    # Use managed identity to get an AAD token for Azure OpenAI
+    try:
+        from azure.identity import ManagedIdentityCredential, DefaultAzureCredential
+
+        if _MANAGED_IDENTITY_CLIENT_ID:
+            credential = ManagedIdentityCredential(client_id=_MANAGED_IDENTITY_CLIENT_ID)
+        else:
+            credential = DefaultAzureCredential()
+
+        token = credential.get_token("https://cognitiveservices.azure.com/.default")
+        return token.token
+    except Exception:
+        logger.exception("Failed to acquire Azure OpenAI token via managed identity")
+        return ""
+
+
+def _search_service_name() -> str:
+    """Extract service name from endpoint URL."""
+    return _SEARCH_ENDPOINT.replace("https://", "").split(".")[0]
+
+
+def _build_mem0_config(api_key: str) -> dict:
+    """Build mem0 config dict."""
+    return {
+        "llm": {
+            "provider": "azure_openai",
+            "config": {
+                "model": _LLM_DEPLOYMENT,
+                "temperature": 0.1,
+                "max_tokens": 2000,
+                "azure_kwargs": {
+                    "azure_deployment": _LLM_DEPLOYMENT,
+                    "api_version": _LLM_API_VERSION,
+                    "azure_endpoint": _OPENAI_ENDPOINT,
+                    "api_key": api_key,
+                },
+            },
+        },
+        "embedder": {
+            "provider": "azure_openai",
+            "config": {
+                "model": _EMBEDDING_DEPLOYMENT,
+                "azure_kwargs": {
+                    "azure_deployment": _EMBEDDING_DEPLOYMENT,
+                    "api_version": _EMBEDDING_API_VERSION,
+                    "azure_endpoint": _OPENAI_ENDPOINT,
+                    "api_key": api_key,
+                },
+            },
+        },
+        "vector_store": {
+            "provider": "azure_ai_search",
+            "config": {
+                "service_name": _search_service_name(),
+                "api_key": _SEARCH_KEY,
+                "collection_name": _COLLECTION_NAME,
+                "embedding_model_dims": 1536,
+            },
+        },
+    }
 
 
 class Mem0Memory(MemoryBackend):
-    """Async mem0-backed conversation memory using the CLI."""
+    """mem0 semantic memory backed by Azure AI Search."""
 
     def __init__(self):
+        self._mem0 = None
         self._ready = False
-        # In-memory buffer for current session turns (flushed to mem0 on close)
-        self._session_turns: dict[str, list[dict]] = {}  # caller_id -> turns
+        self._session_turns: dict[str, list[dict]] = {}
 
     async def initialize(self) -> bool:
-        """Check that the mem0 CLI is available."""
-        try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                [_MEM0_CLI, "--help"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                self._ready = True
-                logger.info("Conversation memory initialized (mem0)")
-                return True
-            else:
-                logger.warning("mem0 CLI not functional: %s", result.stderr)
-                return False
-        except FileNotFoundError:
-            logger.warning("mem0 CLI not found at %s — memory disabled", _MEM0_CLI)
+        if not _SEARCH_ENDPOINT or not _SEARCH_KEY:
+            logger.warning("AZURE_SEARCH_ENDPOINT/KEY not set — mem0 memory disabled")
             return False
+        if not _OPENAI_ENDPOINT:
+            logger.warning("MEM0_OPENAI_ENDPOINT not set — mem0 memory disabled")
+            return False
+
+        try:
+            api_key = _get_openai_api_key()
+            if not api_key:
+                logger.warning("Could not obtain Azure OpenAI API key — mem0 disabled")
+                return False
+
+            config = _build_mem0_config(api_key)
+
+            def _init():
+                from mem0 import Memory
+                return Memory.from_config(config)
+
+            self._mem0 = await asyncio.to_thread(_init)
+            self._ready = True
+            logger.info("Conversation memory initialized (mem0 + Azure AI Search)")
+            return True
         except Exception:
             logger.exception("Failed to initialize mem0 memory")
             return False
@@ -75,157 +150,110 @@ class Mem0Memory(MemoryBackend):
         session_id: str = "",
         metadata: Optional[dict] = None,
     ) -> Optional[str]:
-        """Buffer a turn and also add it to mem0 for extraction."""
         if not self._ready or not text.strip():
             return None
 
-        # Buffer for session context
+        # Buffer for session
         if caller_id not in self._session_turns:
             self._session_turns[caller_id] = []
-        turn = {
+        self._session_turns[caller_id].append({
             "role": role,
             "text": text,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "sessionId": session_id,
-        }
-        self._session_turns[caller_id].append(turn)
+        })
 
-        # Add to mem0 as a message (mem0 extracts facts automatically)
+        # Add to mem0 (extracts facts via LLM)
         user_id = _caller_to_user_id(caller_id)
+        mem0_role = "user" if role == "user" else "assistant"
+        messages = [{"role": mem0_role, "content": text}]
+
         try:
-            mem0_role = "user" if role == "user" else "assistant"
-            message = f"[{mem0_role}] {text}"
             result = await asyncio.to_thread(
-                subprocess.run,
-                [_MEM0_CLI, "add", user_id, message],
-                capture_output=True,
-                text=True,
-                timeout=30,
+                self._mem0.add, messages, user_id=user_id
             )
-            if result.returncode == 0:
-                try:
-                    data = json.loads(result.stdout)
-                    doc_id = data.get("results", [{}])[0].get("id", "")
-                    logger.debug("mem0 add for %s: %s", caller_id, doc_id)
-                    return doc_id
-                except (json.JSONDecodeError, IndexError):
-                    return "ok"
-            else:
-                logger.warning("mem0 add failed: %s", result.stderr)
-                return None
+            results = result.get("results", [])
+            doc_id = results[0].get("id", "") if results else ""
+            logger.debug("mem0 add for %s: %s", caller_id, doc_id)
+            return doc_id or "ok"
         except Exception:
             logger.exception("Failed to save turn to mem0 for %s", caller_id)
             return None
 
     async def get_recent_turns(
-        self, caller_id: str, limit: int = _MAX_CONTEXT_TURNS
+        self, caller_id: str, limit: int = 20
     ) -> list[dict]:
-        """Return buffered in-memory turns for current session."""
         turns = self._session_turns.get(caller_id, [])
         return turns[-limit:]
 
     async def get_summary(self, caller_id: str) -> str:
-        """Not used for mem0 — see build_context_prompt instead."""
         return ""
 
     async def save_summary(self, caller_id: str, summary: str) -> bool:
-        """Add summary as a mem0 memory."""
         if not self._ready:
             return False
         user_id = _caller_to_user_id(caller_id)
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                [_MEM0_CLI, "add", user_id, f"[summary] {summary}"],
-                capture_output=True,
-                text=True,
-                timeout=30,
+            await asyncio.to_thread(
+                self._mem0.add,
+                [{"role": "user", "content": f"[summary] {summary}"}],
+                user_id=user_id,
             )
-            return result.returncode == 0
+            return True
         except Exception:
             logger.exception("Failed to save summary to mem0")
             return False
 
     async def build_context_prompt(self, caller_id: str) -> str:
-        """Search mem0 for relevant memories about this caller.
-
-        This is the key advantage of mem0: instead of replaying raw
-        transcripts, we retrieve distilled semantic memories.
-        """
+        """Retrieve distilled semantic memories for this caller."""
         if not self._ready:
             return ""
 
         user_id = _caller_to_user_id(caller_id)
         try:
-            # Get all memories for this caller
             result = await asyncio.to_thread(
-                subprocess.run,
-                [_MEM0_CLI, "list", user_id],
-                capture_output=True,
-                text=True,
-                timeout=15,
+                self._mem0.get_all, user_id=user_id
             )
-            if result.returncode != 0:
-                return ""
-
-            data = json.loads(result.stdout)
-            # mem0 list returns {"results": [{"id": ..., "memory": ..., ...}]}
-            memories = data.get("results", [])
+            memories = result.get("results", [])
             if not memories:
                 return ""
 
-            parts: list[str] = []
-            parts.append("\n--- Caller Memory (semantic) ---")
-            parts.append(f"Caller ID: {caller_id}")
-            parts.append(f"Known facts about this caller ({len(memories)} memories):")
-            for m in memories[:20]:  # cap at 20 memories
+            parts: list[str] = [
+                "\n--- Caller Memory (semantic) ---",
+                f"Caller ID: {caller_id}",
+                f"Known facts about this caller ({len(memories)} memories):",
+            ]
+            for m in memories[:20]:
                 memory_text = m.get("memory", "")
                 if memory_text:
                     parts.append(f"  • {memory_text}")
             parts.append("--- End Memory ---\n")
             return "\n".join(parts)
-
         except Exception:
             logger.exception("Failed to build mem0 context for %s", caller_id)
             return ""
 
     async def delete_caller_history(self, caller_id: str) -> int:
-        """Delete all mem0 memories for a caller."""
         if not self._ready:
             return 0
 
         user_id = _caller_to_user_id(caller_id)
         try:
-            # List all memories first
             result = await asyncio.to_thread(
-                subprocess.run,
-                [_MEM0_CLI, "list", user_id],
-                capture_output=True,
-                text=True,
-                timeout=15,
+                self._mem0.get_all, user_id=user_id
             )
-            if result.returncode != 0:
-                return 0
-
-            data = json.loads(result.stdout)
-            memories = data.get("results", [])
+            memories = result.get("results", [])
             deleted = 0
             for m in memories:
                 mid = m.get("id", "")
                 if mid:
-                    del_result = await asyncio.to_thread(
-                        subprocess.run,
-                        [_MEM0_CLI, "delete", mid],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-                    if del_result.returncode == 0:
+                    try:
+                        await asyncio.to_thread(self._mem0.delete, mid)
                         deleted += 1
+                    except Exception:
+                        pass
 
-            # Clear session buffer
             self._session_turns.pop(caller_id, None)
-
             logger.info("Deleted %d mem0 memories for caller %s", deleted, caller_id)
             return deleted
         except Exception:
@@ -233,38 +261,24 @@ class Mem0Memory(MemoryBackend):
             return 0
 
     async def close(self):
-        """Flush any remaining session turns to mem0 as conversations."""
         for caller_id, turns in self._session_turns.items():
-            if len(turns) >= 2:  # Only flush if there was actual conversation
+            if len(turns) >= 2:
                 user_id = _caller_to_user_id(caller_id)
                 messages = []
                 for t in turns:
                     role = "user" if t["role"] == "user" else "assistant"
                     messages.append({"role": role, "content": t["text"]})
                 try:
-                    proc = await asyncio.to_thread(
-                        subprocess.run,
-                        [_MEM0_CLI, "chat", user_id],
-                        input=json.dumps(messages),
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
+                    await asyncio.to_thread(
+                        self._mem0.add, messages, user_id=user_id
                     )
-                    if proc.returncode == 0:
-                        logger.info(
-                            "Flushed %d turns to mem0 for %s", len(turns), caller_id
-                        )
+                    logger.info("Flushed %d turns to mem0 for %s", len(turns), caller_id)
                 except Exception:
                     logger.exception("Failed to flush session to mem0 for %s", caller_id)
         self._session_turns.clear()
 
 
 def _caller_to_user_id(caller_id: str) -> str:
-    """Convert a phone number / caller ID to a mem0 user_id.
-
-    Uses a short hash to keep it clean while remaining unique.
-    """
-    # Strip +, spaces, etc for consistency
     clean = caller_id.strip().replace(" ", "").replace("-", "")
     if clean.startswith("+"):
         return f"caller-{clean[1:]}"

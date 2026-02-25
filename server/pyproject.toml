@@ -20,7 +20,8 @@ dependencies = [
     "h2>=4.3.0",
     "numpy>=1.24.0",
     "azure-cosmos>=4.9.0",
-    "azure-search-documents>=11.6.0"
+    "azure-search-documents>=11.6.0",
+    "mem0ai>=0.1.0"
 ]
 
 [tool.uv]
