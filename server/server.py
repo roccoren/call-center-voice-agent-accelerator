@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 
+from azure.identity.aio import DefaultAzureCredential
+from azure.keyvault.secrets.aio import SecretClient
 from app.handler.acs_event_handler import AcsEventHandler
 from app.handler.acs_media_handler import ACSMediaHandler
 from app.memory.factory import memory as conversation_memory
@@ -14,9 +16,7 @@ load_dotenv()
 app = Quart(__name__)
 app.config["AZURE_VOICE_LIVE_ENDPOINT"] = os.getenv("AZURE_VOICE_LIVE_ENDPOINT")
 app.config["VOICE_LIVE_MODEL"] = os.getenv("VOICE_LIVE_MODEL", "gpt-4o-mini")
-app.config["ACS_ENDPOINT"] = os.getenv("ACS_ENDPOINT") or os.getenv(
-    "AZURE_COMMUNICATION_SERVICE_ENDPOINT"
-)
+app.config["ACS_ENDPOINT"] = os.getenv("ACS_ENDPOINT") or os.getenv("AZURE_COMMUNICATION_SERVICE_ENDPOINT")
 app.config["ACS_DEV_TUNNEL"] = os.getenv("ACS_DEV_TUNNEL", "")
 app.config["AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID"] = os.getenv(
     "AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID", ""
@@ -31,6 +31,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _extract_acs_endpoint(connection_string: str) -> str:
+    parts = dict(
+        item.split("=", 1)
+        for item in connection_string.split(";")
+        if "=" in item and item.strip()
+    )
+    return parts.get("endpoint", parts.get("Endpoint", "")).strip()
+
+
+async def _load_acs_connection_string_from_key_vault(config: dict) -> str:
+    key_vault_url = os.getenv("AZURE_KEY_VAULT_URL", "").strip()
+    secret_name = os.getenv("ACS_CONNECTION_STRING_SECRET_NAME", "acs-connection-string").strip()
+    if not key_vault_url:
+        logger.warning("AZURE_KEY_VAULT_URL is not set; skipping ACS connection string lookup")
+        return ""
+
+    managed_identity_client_id = config.get("AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID") or None
+    try:
+        async with DefaultAzureCredential(
+            managed_identity_client_id=managed_identity_client_id
+        ) as credential:
+            client = SecretClient(vault_url=key_vault_url, credential=credential)
+            secret = await client.get_secret(secret_name)
+            logger.info("Loaded ACS connection string from Key Vault secret '%s'", secret_name)
+            return secret.value
+    except Exception:
+        logger.exception("Failed to load ACS connection string from Key Vault")
+        return ""
+
 # Log ambient configuration on startup
 ambient_preset = app.config["AMBIENT_PRESET"]
 if ambient_preset and ambient_preset != "none":
@@ -38,12 +68,22 @@ if ambient_preset and ambient_preset != "none":
 else:
     logger.info("Ambient scenes DISABLED (preset=none)")
 
-acs_handler = AcsEventHandler(app.config)
+acs_handler = None
 
 
 @app.before_serving
 async def startup():
     """Initialize conversation memory on app startup."""
+    global acs_handler
+
+    acs_connection_string = await _load_acs_connection_string_from_key_vault(app.config)
+    if acs_connection_string:
+        app.config["ACS_CONNECTION_STRING"] = acs_connection_string
+        if not app.config.get("ACS_ENDPOINT"):
+            app.config["ACS_ENDPOINT"] = _extract_acs_endpoint(acs_connection_string)
+
+    acs_handler = AcsEventHandler(app.config)
+
     ok = await conversation_memory.initialize()
     backend_name = os.getenv("MEMORY_BACKEND", "cosmosdb").lower()
     if ok:
@@ -55,6 +95,9 @@ async def startup():
 @app.route("/acs/incomingcall", methods=["POST"])
 async def incoming_call_handler():
     """Handles initial incoming call event from EventGrid."""
+    if acs_handler is None:
+        return jsonify({"error": "ACS handler not initialized"}), 503
+
     events = await request.get_json()
     host_url = request.host_url.replace("http://", "https://", 1).rstrip("/")
     return await acs_handler.process_incoming_call(events, host_url, app.config)
@@ -63,6 +106,9 @@ async def incoming_call_handler():
 @app.route("/acs/callbacks/<context_id>", methods=["POST"])
 async def acs_event_callbacks(context_id):
     """Handles ACS event callbacks for call connection and streaming events."""
+    if acs_handler is None:
+        return jsonify({"error": "ACS handler not initialized"}), 503
+
     raw_events = await request.get_json()
     return await acs_handler.process_callback_events(context_id, raw_events, app.config)
 

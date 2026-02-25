@@ -21,15 +21,14 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
+from azure.identity import DefaultAzureCredential
 
 from .base import MemoryBackend
 
 logger = logging.getLogger(__name__)
 
-_MEM0_CLI = os.getenv("MEM0_CLI_PATH", "/usr/local/bin/mem0")
-_MAX_CONTEXT_TURNS = int(os.getenv("MEMORY_MAX_CONTEXT_TURNS", "20"))
+_MEM0_CLI = "/usr/local/bin/mem0"
+_MAX_CONTEXT_TURNS = 20
 
 
 class Mem0Memory(MemoryBackend):
@@ -38,8 +37,10 @@ class Mem0Memory(MemoryBackend):
     def __init__(self):
         self._ready = False
         self._identity_credential: Optional[DefaultAzureCredential] = None
-        self._search_credential: Optional[AsyncDefaultAzureCredential] = None
-        self._azure_openai_token_provider = None
+        self._azure_openai_api_key: str = ""
+        self._search_api_key: str = ""
+        self._azure_kwargs: dict = {}
+        self._vector_store_config: dict = {}
         # In-memory buffer for current session turns (flushed to mem0 on close)
         self._session_turns: dict[str, list[dict]] = {}  # caller_id -> turns
 
@@ -52,20 +53,22 @@ class Mem0Memory(MemoryBackend):
             self._identity_credential = DefaultAzureCredential(
                 managed_identity_client_id=managed_identity_client_id
             )
-            self._azure_openai_token_provider = get_bearer_token_provider(
-                self._identity_credential,
-                "https://cognitiveservices.azure.com/.default",
+            credential = self._identity_credential
+
+            self._azure_openai_api_key = await asyncio.to_thread(
+                lambda: credential.get_token(
+                    "https://cognitiveservices.azure.com/.default"
+                ).token
+            )
+            self._search_api_key = await asyncio.to_thread(
+                lambda: credential.get_token(
+                    "https://search.azure.com/.default"
+                ).token
             )
 
-            self._search_credential = AsyncDefaultAzureCredential(
-                managed_identity_client_id=managed_identity_client_id
-            )
-
-            # Validate token-based auth paths early.
-            await asyncio.to_thread(self._azure_openai_token_provider)
-            await self._search_credential.get_token(
-                "https://search.azure.com/.default"
-            )
+            # Keep config shape aligned with mem0 Azure auth expectations.
+            self._azure_kwargs = {"api_key": self._azure_openai_api_key}
+            self._vector_store_config = {"api_key": self._search_api_key}
 
             result = await asyncio.to_thread(
                 subprocess.run,
@@ -283,8 +286,6 @@ class Mem0Memory(MemoryBackend):
                 except Exception:
                     logger.exception("Failed to flush session to mem0 for %s", caller_id)
         self._session_turns.clear()
-        if self._search_credential:
-            await self._search_credential.close()
         if self._identity_credential:
             self._identity_credential.close()
 

@@ -15,6 +15,7 @@ dependencies = [
     "aiohttp>=3.12.14",
     "azure-eventgrid>=4.22.0",
     "azure-identity>=1.23.0",
+    "azure-keyvault-secrets>=4.9.0",
     "azure-communication-callautomation>=1.4.0",
     "openai[realtime]>=1.93.0",
     "h2>=4.3.0",
