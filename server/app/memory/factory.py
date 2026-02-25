@@ -2,8 +2,9 @@
 
 Set ``MEMORY_BACKEND`` env var to choose the backing store:
 
-- ``cosmosdb``  (default) — Azure Cosmos DB
-- ``aisearch``  — Azure AI Search
+- ``cosmosdb``  (default) — Azure Cosmos DB (raw transcript storage)
+- ``aisearch``  — Azure AI Search (raw transcript storage + keyword search)
+- ``mem0``      — mem0 semantic memory (distilled facts via LLM)
 
 The factory returns a singleton ``MemoryBackend`` instance.
 """
@@ -20,7 +21,10 @@ _BACKEND = os.getenv("MEMORY_BACKEND", "cosmosdb").lower().strip()
 
 def get_memory() -> MemoryBackend:
     """Return the configured memory backend singleton."""
-    if _BACKEND in ("aisearch", "ai_search", "search"):
+    if _BACKEND in ("mem0", "mem-0"):
+        from .mem0_memory import Mem0Memory
+        return Mem0Memory()
+    elif _BACKEND in ("aisearch", "ai_search", "search"):
         from .ai_search_memory import AISearchMemory
         return AISearchMemory()
     else:
