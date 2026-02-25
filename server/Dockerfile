@@ -54,6 +54,10 @@ RUN useradd -r -d /app -g app -N app
 # Copy built app from builder stage and set ownership
 COPY --from=builder --chown=app:app /app /app
 
+# Create mem0 data directory (mem0 SDK needs this for telemetry/setup)
+RUN mkdir -p /app/.mem0 && chown app:app /app/.mem0
+ENV MEM0_DIR=/app/.mem0
+
 WORKDIR /app
 
 # Switch to non-root user
