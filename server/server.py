@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 
@@ -122,14 +123,59 @@ async def acs_ws():
     logger = logging.getLogger("acs_ws")
     logger.info("Incoming ACS WebSocket connection")
 
-    # ACS media streaming sends caller info in the first message metadata,
-    # but we also look up from the call registry populated by event handler.
+    # --- Resolve caller identity from ACS headers + call registry ----------
+    # ACS sends the call connection ID as a WebSocket header when connecting.
+    call_connection_id = websocket.headers.get("x-ms-call-connection-id", "")
     caller_id = "phone-anonymous"
     session_id = ""
 
+    if call_connection_id:
+        logger.info("ACS call_connection_id from header: %s", call_connection_id)
+        entry = await call_registry.lookup(call_connection_id)
+        if entry:
+            caller_id = entry["callerId"]
+            session_id = entry.get("sessionId", "")
+            logger.info(
+                "Resolved caller from registry: caller_id=%s, session_id=%s",
+                caller_id,
+                session_id,
+            )
+        else:
+            logger.warning(
+                "No registry entry for call_connection_id %s — using anonymous",
+                call_connection_id,
+            )
+    else:
+        logger.warning("No x-ms-call-connection-id header — using anonymous")
+
     handler = ACSMediaHandler(app.config, caller_id=caller_id, session_id=session_id)
     await handler.init_incoming_websocket(websocket, is_raw_audio=False)
-    asyncio.create_task(handler.connect())
+
+    # Wait for the first ACS metadata message before connecting to Voice Live.
+    # This ensures the media subscription is established before we start
+    # streaming, and gives us a second chance to resolve caller identity if
+    # the header was missing.
+    try:
+        first_msg = await websocket.receive()
+        first_data = json.loads(first_msg) if isinstance(first_msg, str) else {}
+
+        if first_data.get("kind") == "AudioMetadata":
+            logger.info("Received ACS AudioMetadata: %s", first_data)
+        else:
+            # Not metadata — treat as normal audio and forward after connect.
+            logger.info("First message is not AudioMetadata (kind=%s)", first_data.get("kind"))
+    except Exception:
+        logger.exception("Error receiving first ACS message")
+        first_msg = None
+        first_data = {}
+
+    # Now connect to Voice Live (loads memory with correct caller_id).
+    await handler.connect()
+
+    # Forward the first message if it was audio data (not metadata).
+    if first_msg is not None and first_data.get("kind") != "AudioMetadata":
+        await handler.acs_to_voicelive(first_msg)
+
     try:
         while True:
             msg = await websocket.receive()
